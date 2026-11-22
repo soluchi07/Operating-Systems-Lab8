@@ -1,3 +1,4 @@
+// mmu.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -40,70 +41,100 @@ void get_input(char *args[], int input[][2], int *n, int *size, int *policy)
         
 }
 
-void allocate_memory(list_t * freelist, list_t * alloclist, int pid, int blocksize, int policy) {
-  // Best/Worst fit lists are already sorted, so "first block that fits"
-  // gives the right answer for all three policies.
-  int idx = list_get_index_of_by_Size(freelist, blocksize);
-
-  if (idx == -1) {
-      printf("Error: Memory Allocation %d blocks\n", blocksize);
-      return;
-  }
-
-  block_t *blk = list_remove_at_index(freelist, idx);
-  int original_end = blk->end;
-
-  blk->pid = pid;
-  blk->end = blk->start + blocksize - 1;
-  list_add_ascending_by_address(alloclist, blk);
-
-  // only create a fragment if something is actually left over
-  if (blk->end < original_end) {
-    block_t *fragment = malloc(sizeof(block_t));
-    fragment->pid = 0;
-    fragment->start = blk->end + 1;
-    fragment->end = original_end;
-
+/* Inserts a free block into freelist according to the allocation policy.
+ * Params: freelist - list of free blocks
+ *         blk      - block to insert (its pid should already be 0)
+ *         policy   - 1 = First Fit (back of list), 2 = Best Fit (ascending
+ *                    by size), 3 = Worst Fit (descending by size) */
+static void add_to_freelist(list_t * freelist, block_t * blk, int policy) {
     if (policy == 1)
-        list_add_to_back(freelist, fragment);
+        list_add_to_back(freelist, blk);
     else if (policy == 2)
-        list_add_ascending_by_blocksize(freelist, fragment);
+        list_add_ascending_by_blocksize(freelist, blk);
     else
-        list_add_descending_by_blocksize(freelist, fragment);
-  }
-
+        list_add_descending_by_blocksize(freelist, blk);
 }
 
+/* Allocates blocksize units for pid using the given policy.
+ * The free list is already ordered by policy, so the first block that fits
+ * is the correct choice for First, Best, and Worst Fit alike. The chosen
+ * block moves to alloclist (sorted by address). Any leftover memory becomes
+ * a fragment that is reinserted into freelist by policy.
+ * Params: freelist  - list of free blocks
+ *         alloclist - list of allocated blocks
+ *         pid       - process requesting memory
+ *         blocksize - number of units requested
+ *         policy    - 1 = First Fit, 2 = Best Fit, 3 = Worst Fit
+ * Prints an error (and changes nothing) if no free block is large enough. */
+void allocate_memory(list_t * freelist, list_t * alloclist, int pid, int blocksize, int policy) {
+    int idx = list_get_index_of_by_Size(freelist, blocksize);
+
+    if (idx == -1) {
+        printf("Error: Memory Allocation %d blocks\n", blocksize);
+        return;
+    }
+
+    block_t *blk = list_remove_at_index(freelist, idx);
+    int original_end = blk->end;
+
+    blk->pid = pid;
+    blk->end = blk->start + blocksize - 1;
+    list_add_ascending_by_address(alloclist, blk);
+
+    // only create a fragment if something is actually left over
+    if (blk->end < original_end) {
+        block_t *fragment = malloc(sizeof(block_t));
+        if (fragment == NULL) {
+            fprintf(stderr, "Error: out of memory\n");
+            exit(1);
+        }
+        fragment->pid = 0;
+        fragment->start = blk->end + 1;
+        fragment->end = original_end;
+        add_to_freelist(freelist, fragment, policy);
+    }
+}
+
+/* Releases the memory owned by pid: removes its block from alloclist,
+ * resets the pid to 0, and reinserts the block into freelist by policy.
+ * Params: alloclist - list of allocated blocks
+ *         freelist  - list of free blocks
+ *         pid       - process whose memory is released
+ *         policy    - 1 = First Fit, 2 = Best Fit, 3 = Worst Fit
+ * Prints an error (and changes nothing) if pid has no allocated block. */
 void deallocate_memory(list_t * alloclist, list_t * freelist, int pid, int policy) { 
-  int idx = list_get_index_of_by_Pid(alloclist, pid);
+    int idx = list_get_index_of_by_Pid(alloclist, pid);
 
-  if (idx == -1) {
-      printf("Error: Can't locate Memory Used by PID: %d\n", pid);
-      return;
-  }
+    if (idx == -1) {
+        printf("Error: Can't locate Memory Used by PID: %d\n", pid);
+        return;
+    }
 
-  block_t *blk = list_remove_at_index(alloclist, idx);
-  blk->pid = 0;
-
-  if (policy == 1)
-    list_add_to_back(freelist, blk);
-  else if (policy == 2)
-    list_add_ascending_by_blocksize(freelist, blk);
-  else
-    list_add_descending_by_blocksize(freelist, blk);
+    block_t *blk = list_remove_at_index(alloclist, idx);
+    blk->pid = 0;
+    add_to_freelist(freelist, blk, policy);
 }
 
+/* Sorts the free list by address and merges physically adjacent blocks.
+ * Ownership: the blocks move from the old list into the returned list, and
+ * the (now empty) old list struct is freed here. The caller must replace
+ * its pointer with the returned list and must not use the old one again,
+ * which is exactly what main does (FREE_LIST = coalese_memory(FREE_LIST)),
+ * so there is no double free.
+ * Params:  list - the free list to coalesce
+ * Returns: a new list, sorted by address, with adjacent blocks merged */
 list_t* coalese_memory(list_t * list){
   list_t *temp_list = list_alloc();
   block_t *blk;
   
-  while((blk = list_remove_from_front(list)) != NULL) {  // sort the list in ascending order by address
+  while((blk = list_remove_from_front(list)) != NULL) {  // sort ascending by address
+        blk->pid = 0;                                    // free blocks always have pid 0
         list_add_ascending_by_address(temp_list, blk);
   }
   
-  // try to combine physically adjacent blocks
+  list_free(list);                 // list is empty now; frees only the struct
   
-  list_coalese_nodes(temp_list);
+  list_coalese_nodes(temp_list);   // merge physically adjacent blocks
         
   return temp_list;
 }
